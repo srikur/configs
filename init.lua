@@ -85,6 +85,8 @@ require("lazy").setup({
           view = { width = 35 },
           filters = { dotfiles = false },
           actions = { open_file = { window_picker = { enable = false } } },
+          filesystem_watchers = { enable = true },
+          reload_on_bufenter = true,
         })
         -- Auto-open nvim-tree on startup, then focus back on the file
         vim.api.nvim_create_autocmd("VimEnter", {
@@ -156,7 +158,7 @@ require("lazy").setup({
       "williamboman/mason-lspconfig.nvim",
       dependencies = { "williamboman/mason.nvim" },
       opts = {
-        ensure_installed = { "lua_ls", "basedpyright", "ruff", "ts_ls", "rust_analyzer" },
+        ensure_installed = { "lua_ls", "basedpyright", "ruff", "ts_ls", "rust_analyzer", "clangd" },
         automatic_installation = true,
       },
     },
@@ -266,9 +268,13 @@ require("lazy").setup({
 
         vim.lsp.config("ts_ls", { capabilities = capabilities })
         vim.lsp.config("rust_analyzer", { capabilities = capabilities })
+        vim.lsp.config("clangd", {
+          capabilities = capabilities,
+          cmd = { "clangd", "--background-index", "--clang-tidy", "--header-insertion=iwyu" },
+        })
 
         -- Enable all configured servers
-        vim.lsp.enable({ "lua_ls", "basedpyright", "ruff", "ts_ls", "rust_analyzer" })
+        vim.lsp.enable({ "lua_ls", "basedpyright", "ruff", "ts_ls", "rust_analyzer", "clangd" })
       end,
     },
 
