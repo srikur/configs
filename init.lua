@@ -64,13 +64,15 @@ end
 -- Setup lazy.nvim
 require("lazy").setup({
   spec = {
-    -- Colorscheme
+    -- Colorscheme (Flexoki dark: matte warm-gray "ink" background, muted flat colors)
     {
-      "folke/tokyonight.nvim",
+      "kepano/flexoki-neovim",
+      name = "flexoki",
       priority = 1000,
       config = function()
-        require("tokyonight").setup({ style = "storm" })
-        vim.cmd.colorscheme("tokyonight")
+        vim.o.termguicolors = true
+        vim.o.background = "dark"
+        vim.cmd.colorscheme("flexoki-dark")
       end,
     },
 
@@ -270,7 +272,21 @@ require("lazy").setup({
         vim.lsp.config("rust_analyzer", { capabilities = capabilities })
         vim.lsp.config("clangd", {
           capabilities = capabilities,
-          cmd = { "clangd", "--background-index", "--clang-tidy", "--header-insertion=iwyu" },
+          cmd = {
+            -- Apple's clangd, not Mason's: the Mason build (22.1.6) fails to parse
+            -- Homebrew GCC 16's libstdc++ headers, Apple's parses them cleanly
+            "/usr/bin/clangd",
+            "--background-index",
+            "--clang-tidy",
+            "--header-insertion=iwyu",
+            -- Allow clangd to query Homebrew GCC for its libstdc++ include paths/target,
+            -- so projects compiled with g++-16 (e.g. C++26) resolve headers correctly
+            "--query-driver=/opt/homebrew/**/g++-*,/opt/homebrew/**/gcc-*",
+          },
+          init_options = {
+            -- Used only for files with no compile_commands.json entry
+            fallbackFlags = { "-std=c++26" },
+          },
         })
 
         -- Enable all configured servers
@@ -397,9 +413,9 @@ require("lazy").setup({
       build = ":TSUpdate",
       config = function()
         local ensure = { "lua", "python", "javascript", "typescript", "rust", "c", "cpp", "json", "yaml", "html", "css", "bash", "markdown", "vimdoc" }
-        for _, lang in ipairs(ensure) do
-          pcall(vim.treesitter.language.add, lang)
-        end
+        -- Compiles any missing parsers (async, needs the tree-sitter CLI);
+        -- no-op for parsers already installed
+        require("nvim-treesitter").install(ensure)
         vim.api.nvim_create_autocmd("FileType", {
           group = vim.api.nvim_create_augroup("treesitter-auto-install", { clear = true }),
           callback = function(event)
@@ -414,8 +430,35 @@ require("lazy").setup({
       "nvim-lualine/lualine.nvim",
       dependencies = { "nvim-tree/nvim-web-devicons" },
       config = function()
+        -- Flat statusline built from the Flexoki dark palette: matte solid
+        -- blocks, no powerline separators
+        local p = {
+          paper = "#100F0F", bg2 = "#1C1B1A", ui = "#282726",
+          tx = "#CECDC3", tx2 = "#878580", tx3 = "#575653",
+          green = "#879A39", purple = "#8B7EC8", red = "#D14D41", yellow = "#D0A215",
+        }
+        local flexoki_flat = {
+          normal = {
+            a = { fg = p.tx, bg = p.ui, gui = "bold" },
+            b = { fg = p.tx2, bg = p.bg2 },
+            c = { fg = p.tx2, bg = p.bg2 },
+          },
+          insert = { a = { fg = p.paper, bg = p.green, gui = "bold" } },
+          visual = { a = { fg = p.paper, bg = p.purple, gui = "bold" } },
+          replace = { a = { fg = p.paper, bg = p.red, gui = "bold" } },
+          command = { a = { fg = p.paper, bg = p.yellow, gui = "bold" } },
+          inactive = {
+            a = { fg = p.tx3, bg = p.bg2 },
+            b = { fg = p.tx3, bg = p.bg2 },
+            c = { fg = p.tx3, bg = p.bg2 },
+          },
+        }
         require("lualine").setup({
-          options = { theme = "tokyonight" },
+          options = {
+            theme = flexoki_flat,
+            section_separators = "",
+            component_separators = "",
+          },
         })
       end,
     },
@@ -535,7 +578,8 @@ require("lazy").setup({
           size = 15,
           open_mapping = [[<C-\>]],
           direction = "horizontal",
-          shade_terminals = true,
+          -- Shading darkens the terminal split, which clashes with a flat light theme
+          shade_terminals = false,
         })
         vim.keymap.set("n", "<leader>t1", "<cmd>1ToggleTerm<CR>", { desc = "Terminal 1" })
         vim.keymap.set("n", "<leader>t2", "<cmd>2ToggleTerm<CR>", { desc = "Terminal 2" })
@@ -576,7 +620,7 @@ require("lazy").setup({
   },
   -- Configure any other settings here. See the documentation for more details.
   -- colorscheme that will be used when installing plugins.
-  install = { colorscheme = { "tokyonight" } },
+  install = { colorscheme = { "flexoki-dark" } },
   -- automatically check for plugin updates
   checker = { enabled = true },
 })
