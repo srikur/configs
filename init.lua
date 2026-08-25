@@ -50,6 +50,20 @@ vim.keymap.set('n', '<C-h>', '<C-w><C-h>', { desc = 'Move focus to the left wind
 vim.keymap.set('n', '<C-l>', '<C-w><C-l>', { desc = 'Move focus to the right window' })
 vim.keymap.set('n', '<C-j>', '<C-w><C-j>', { desc = 'Move focus to the lower window' })
 vim.keymap.set('n', '<C-k>', '<C-w><C-k>', { desc = 'Move focus to the upper window' })
+-- macOS-style Option+Left/Right word movement. Depending on the terminal,
+-- Option+arrow arrives as <M-Left>/<M-Right> or as Esc-b/Esc-f (<M-b>/<M-f>).
+-- Option+Right lands after the end of the word, like macOS text fields.
+for _, lhs in ipairs({ '<M-Left>', '<M-b>' }) do
+  vim.keymap.set({ 'n', 'i', 'v', 'c' }, lhs, '<C-Left>', { desc = 'Move back a word' })
+end
+for _, lhs in ipairs({ '<M-Right>', '<M-f>' }) do
+  vim.keymap.set({ 'n', 'v' }, lhs, 'e', { desc = 'Move to end of word' })
+  vim.keymap.set('i', lhs, '<Esc>ea', { desc = 'Move to end of word' })
+  vim.keymap.set('c', lhs, '<C-Right>', { desc = 'Move forward a word' })
+end
+-- macOS-style Option+Backspace: delete the previous word
+vim.keymap.set({ 'i', 'c' }, '<M-BS>', '<C-w>', { desc = 'Delete previous word' })
+vim.keymap.set('n', '<M-BS>', 'db', { desc = 'Delete previous word' })
 vim.api.nvim_create_autocmd('TextYankPost', {
   desc = 'Highlight when yanking (copying) text',
   group = vim.api.nvim_create_augroup('kickstart-highlight-yank', { clear = true }),
