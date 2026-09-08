@@ -220,21 +220,136 @@ vim.keymap.set('n', ']q', '<cmd>cnext<CR>', { desc = 'Next quickfix item' })
 vim.keymap.set('n', '[q', '<cmd>cprevious<CR>', { desc = 'Previous quickfix item' })
 vim.keymap.set('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
 
+-- Islands Dark, using CLion's bundled IslandSchemeDark.xml and UI palette.
+-- https://github.com/JetBrains/intellij-community/tree/master/platform/platform-resources/src/themes/islands
+-- Kept here so the configuration remains a single file. :IslandsDark reapplies it.
+local islands = {
+  bg = '#191A1C', panel = '#212326', chrome = '#26282C', border = '#33353B',
+  fg = '#BCBEC4', text = '#D1D3D9', muted = '#9FA2A8', comment = '#7A7E85',
+  line = '#4B5059', cursorline = '#1F2024', selection = '#2A4371',
+  orange = '#CF8E6D', green = '#6AAB73', blue = '#56A8F5', teal = '#2AACB8',
+  purple = '#C77DBB', yellow = '#F2C55C', red = '#F75464', accent = '#71A1FE',
+  added = '#73BD79', changed = '#70AEFF', deleted = '#E88F89',
+}
+local function islands_dark()
+  local p = islands
+  vim.o.termguicolors = true
+  vim.o.background = 'dark'
+  vim.cmd('highlight clear')
+  vim.g.colors_name = 'islands-dark'
+  local groups = {
+    Normal = { fg = p.fg, bg = p.bg }, NormalNC = { fg = p.fg, bg = p.bg },
+    NormalFloat = { fg = p.fg, bg = p.chrome },
+    FloatBorder = { fg = p.border, bg = p.chrome }, FloatTitle = { fg = p.text, bg = p.chrome, bold = true },
+    WinSeparator = { fg = p.border, bg = p.bg },
+    Cursor = { fg = p.bg, bg = '#CED0D6' }, CursorLine = { bg = p.cursorline },
+    CursorLineNr = { fg = '#A1A3AB' }, LineNr = { fg = p.line },
+    SignColumn = { bg = p.bg }, FoldColumn = { fg = p.comment, bg = p.bg },
+    Folded = { fg = p.comment, bg = p.chrome }, ColorColumn = { bg = p.chrome },
+    NonText = { fg = p.border }, Whitespace = { fg = '#4E5157' }, EndOfBuffer = { fg = p.bg },
+    Visual = { bg = p.selection }, Search = { bg = '#2D543F' },
+    IncSearch = { fg = p.bg, bg = p.yellow }, CurSearch = { fg = p.bg, bg = p.yellow },
+    MatchParen = { bg = '#43454A', bold = true },
+    Pmenu = { fg = p.fg, bg = p.chrome }, PmenuSel = { fg = p.text, bg = p.selection },
+    PmenuSbar = { bg = p.border }, PmenuThumb = { bg = '#5F6269' },
+    StatusLine = { fg = p.text, bg = p.chrome }, StatusLineNC = { fg = p.muted, bg = p.chrome },
+    TabLine = { fg = p.muted, bg = p.chrome }, TabLineFill = { bg = p.chrome },
+    TabLineSel = { fg = p.text, bg = p.bg, bold = true },
+    WinBar = { fg = p.text, bg = p.bg }, WinBarNC = { fg = p.muted, bg = p.bg },
+    Directory = { fg = p.accent }, Title = { fg = p.text, bold = true },
+    ErrorMsg = { fg = p.red }, WarningMsg = { fg = p.yellow }, MoreMsg = { fg = p.green },
+    Question = { fg = p.accent }, ModeMsg = { fg = p.text },
+    Comment = { fg = p.comment }, Constant = { fg = p.purple },
+    String = { fg = p.green }, Character = { fg = p.green }, Number = { fg = p.teal },
+    Boolean = { fg = p.orange }, Float = { fg = p.teal }, Identifier = { fg = p.fg },
+    Function = { fg = p.blue }, Statement = { fg = p.orange }, Keyword = { fg = p.orange },
+    Operator = { fg = p.fg }, PreProc = { fg = p.orange }, Type = { fg = p.fg },
+    StorageClass = { fg = p.orange }, Structure = { fg = p.orange }, Typedef = { fg = p.orange },
+    Special = { fg = p.orange }, Delimiter = { fg = p.fg },
+    Underlined = { fg = p.accent, underline = true }, Ignore = { fg = p.comment },
+    Error = { sp = p.red, undercurl = true }, Todo = { fg = '#8BB33D', italic = true },
+    DiffAdd = { bg = '#203B2A' }, DiffChange = { bg = '#1B283F' },
+    DiffText = { bg = '#2A4371' }, DiffDelete = { fg = p.deleted, bg = '#3F1E21' },
+    LspReferenceText = { bg = '#373B39' }, LspReferenceRead = { bg = '#373B39' },
+    LspReferenceWrite = { bg = '#402F33' }, LspSignatureActiveParameter = { fg = p.text, bold = true },
+    LspInlayHint = { fg = '#868A91', bg = '#393B40' },
+    ['@variable'] = { fg = p.fg }, ['@variable.builtin'] = { fg = p.orange },
+    ['@variable.parameter'] = { fg = p.fg }, ['@variable.member'] = { fg = p.purple },
+    ['@property'] = { fg = p.purple }, ['@type.builtin'] = { fg = p.orange },
+    ['@constant.builtin'] = { fg = p.orange }, ['@constant.macro'] = { fg = '#B3AE60' },
+    ['@function.macro'] = { fg = '#B3AE60' }, ['@string.escape'] = { fg = p.orange },
+    ['@comment.documentation'] = { fg = '#5F826B', italic = true },
+    ['@markup.heading'] = { fg = p.blue, bold = true }, ['@markup.raw'] = { fg = p.green },
+    ['@markup.link'] = { fg = p.accent, underline = true },
+    ['@markup.strong'] = { bold = true }, ['@markup.italic'] = { italic = true },
+    ['@tag'] = { fg = '#D5B778' }, ['@tag.attribute'] = { fg = p.fg },
+    ['@lsp.type.typeParameter'] = { fg = '#16BAAC' },
+    ['@lsp.mod.deprecated'] = { strikethrough = true },
+    NvimTreeNormal = { fg = p.fg, bg = p.panel }, NvimTreeNormalNC = { fg = p.fg, bg = p.panel },
+    NvimTreeEndOfBuffer = { fg = p.panel, bg = p.panel },
+    NvimTreeWinSeparator = { fg = p.border, bg = p.panel },
+    NvimTreeRootFolder = { fg = p.text, bold = true }, NvimTreeFolderName = { fg = p.fg },
+    NvimTreeOpenedFolderName = { fg = p.text }, NvimTreeEmptyFolderName = { fg = p.muted },
+    NvimTreeFolderIcon = { fg = p.muted }, NvimTreeIndentMarker = { fg = p.border },
+    NvimTreeCursorLine = { bg = p.selection },
+    TelescopeNormal = { fg = p.fg, bg = p.chrome }, TelescopeBorder = { fg = p.border, bg = p.chrome },
+    TelescopeTitle = { fg = p.text, bg = p.chrome, bold = true },
+    TelescopeSelection = { bg = p.selection }, TelescopeMatching = { fg = p.accent, bold = true },
+    TelescopePromptPrefix = { fg = p.accent },
+    CmpItemAbbr = { fg = p.fg }, CmpItemAbbrMatch = { fg = p.accent, bold = true },
+    CmpItemAbbrDeprecated = { fg = p.comment, strikethrough = true }, CmpItemMenu = { fg = p.comment },
+    WhichKey = { fg = p.accent }, WhichKeyGroup = { fg = p.blue },
+    WhichKeyDesc = { fg = p.fg }, WhichKeySeparator = { fg = p.comment },
+    IblIndent = { fg = '#323438' }, IblScope = { fg = '#4E5157' },
+    CopilotSuggestion = { fg = p.comment, italic = true },
+    DapBreakpoint = { fg = p.red }, DapStopped = { fg = p.yellow, bg = '#273552' },
+    DapUIVariable = { fg = p.fg }, DapUIScope = { fg = p.blue }, DapUIType = { fg = p.teal },
+    DapUIValue = { fg = p.green }, DapUIFrameName = { fg = p.fg }, DapUIThread = { fg = p.green },
+    DapUIStoppedThread = { fg = p.yellow }, DapUIBreakpointsPath = { fg = p.blue },
+    DapUIBreakpointsInfo = { fg = p.green }, DapUIBreakpointsCurrentLine = { fg = p.yellow, bold = true },
+    DapUILineNumber = { fg = p.accent }, DapUIDecoration = { fg = p.border },
+  }
+  for severity, color in pairs({ Error = p.red, Warn = p.yellow, Info = p.accent, Hint = p.muted, Ok = p.green }) do
+    groups['Diagnostic' .. severity] = { fg = color }
+    groups['DiagnosticUnderline' .. severity] = { sp = color, undercurl = true }
+    groups['DiagnosticVirtualText' .. severity] = { fg = color }
+  end
+  for name, color in pairs({ Add = p.added, Change = p.changed, Delete = p.deleted }) do
+    groups['GitSigns' .. name] = { fg = color }
+  end
+  local links = {
+    ['@function'] = 'Function', ['@function.builtin'] = 'Function', ['@function.method'] = 'Function',
+    ['@type'] = 'Type', ['@module'] = 'Identifier', ['@keyword'] = 'Keyword',
+    ['@operator'] = 'Operator', ['@punctuation'] = 'Delimiter',
+    ['@lsp.type.variable'] = '@variable', ['@lsp.type.parameter'] = '@variable.parameter',
+    ['@lsp.type.property'] = '@variable.member', ['@lsp.type.enumMember'] = 'Constant',
+    ['@lsp.type.function'] = 'Function', ['@lsp.type.method'] = 'Function',
+    ['@lsp.type.class'] = 'Type', ['@lsp.type.struct'] = 'Type', ['@lsp.type.enum'] = 'Type',
+    ['@lsp.type.interface'] = 'Type', ['@lsp.type.namespace'] = '@module',
+    ['@lsp.type.macro'] = '@constant.macro',
+    CmpItemAbbrMatchFuzzy = 'CmpItemAbbrMatch', CmpItemKind = 'Type',
+    NvimTreeGitNew = 'GitSignsAdd', NvimTreeGitDirty = 'GitSignsChange', NvimTreeGitDeleted = 'GitSignsDelete',
+    WhichKeyNormal = 'NormalFloat', WhichKeyBorder = 'FloatBorder',
+    DapUIFloatBorder = 'FloatBorder', DapUIFloatNormal = 'NormalFloat',
+  }
+  for name, target in pairs(links) do groups[name] = { link = target } end
+  for name, attrs in pairs(groups) do vim.api.nvim_set_hl(0, name, attrs) end
+  local terminal = {
+    p.bg, p.red, p.green, p.yellow, p.blue, p.purple, p.teal, p.fg,
+    p.comment, '#FA6675', p.added, '#F4CD9A', p.accent, '#D6CDFB', '#8CC1BA', '#FFFFFF',
+  }
+  for i, color in ipairs(terminal) do vim.g['terminal_color_' .. (i - 1)] = color end
+end
+vim.o.winborder = 'rounded'
+islands_dark()
+vim.api.nvim_create_user_command('IslandsDark', function()
+  islands_dark()
+  vim.api.nvim_exec_autocmds('ColorScheme', { pattern = 'islands-dark' })
+end, { desc = 'Apply the built-in Islands Dark palette' })
+
 -- Setup lazy.nvim
 require("lazy").setup({
   spec = {
-    -- Colorscheme (Flexoki dark: matte warm-gray "ink" background, muted flat colors)
-    {
-      "kepano/flexoki-neovim",
-      name = "flexoki",
-      priority = 1000,
-      config = function()
-        vim.o.termguicolors = true
-        vim.o.background = "dark"
-        vim.cmd.colorscheme("flexoki-dark")
-      end,
-    },
-
     -- File tree
     {
       "nvim-tree/nvim-tree.lua",
@@ -601,6 +716,10 @@ require("lazy").setup({
         require("luasnip.loaders.from_vscode").lazy_load()
         cmp.setup({
           preselect = cmp.PreselectMode.None,
+          window = {
+            completion = cmp.config.window.bordered({ winhighlight = 'Normal:NormalFloat,FloatBorder:FloatBorder,CursorLine:PmenuSel,Search:None' }),
+            documentation = cmp.config.window.bordered(),
+          },
           snippet = {
             expand = function(args) luasnip.lsp_expand(args.body) end,
           },
@@ -653,14 +772,13 @@ require("lazy").setup({
       "nvim-lualine/lualine.nvim",
       dependencies = { "nvim-tree/nvim-web-devicons" },
       config = function()
-        -- Flat statusline built from the Flexoki dark palette: matte solid
-        -- blocks, no powerline separators
+        -- Match the Islands window chrome, with a small mode accent.
         local p = {
-          paper = "#100F0F", bg2 = "#1C1B1A", ui = "#282726",
-          tx = "#CECDC3", tx2 = "#878580", tx3 = "#575653",
-          green = "#879A39", purple = "#8B7EC8", red = "#D14D41", yellow = "#D0A215",
+          paper = islands.bg, bg2 = islands.chrome, ui = islands.selection,
+          tx = islands.text, tx2 = islands.muted, tx3 = islands.comment,
+          green = islands.green, purple = islands.purple, red = islands.red, yellow = islands.yellow,
         }
-        local flexoki_flat = {
+        local islands_flat = {
           normal = {
             a = { fg = p.tx, bg = p.ui, gui = "bold" },
             b = { fg = p.tx2, bg = p.bg2 },
@@ -678,7 +796,7 @@ require("lazy").setup({
         }
         require("lualine").setup({
           options = {
-            theme = flexoki_flat,
+            theme = islands_flat,
             section_separators = "",
             component_separators = "",
           },
@@ -802,7 +920,7 @@ require("lazy").setup({
           size = 15,
           open_mapping = [[<C-\>]],
           direction = "horizontal",
-          -- Shading darkens the terminal split, which clashes with a flat light theme
+          -- Keep terminal backgrounds consistent with the editor palette.
           shade_terminals = false,
         })
         vim.keymap.set("n", "<leader>t1", "<cmd>1ToggleTerm<CR>", { desc = "Terminal 1" })
@@ -819,8 +937,28 @@ require("lazy").setup({
       config = function()
         require("bufferline").setup({
           options = {
+            separator_style = 'thin',
+            indicator = { style = 'underline' },
             offsets = {{ filetype = "NvimTree", text = "File Explorer", highlight = "Directory", separator = true }},
             diagnostics = "nvim_lsp",
+          },
+          highlights = {
+            fill = { bg = islands.chrome },
+            background = { fg = islands.muted, bg = islands.chrome },
+            buffer_visible = { fg = islands.fg, bg = islands.panel },
+            buffer_selected = { fg = islands.text, bg = islands.bg, sp = islands.accent, bold = true, italic = false },
+            numbers_selected = { fg = islands.muted, bg = islands.bg, sp = islands.accent },
+            close_button_selected = { fg = islands.muted, bg = islands.bg, sp = islands.accent },
+            modified_selected = { fg = islands.changed, bg = islands.bg, sp = islands.accent },
+            diagnostic_selected = { fg = islands.muted, bg = islands.bg, sp = islands.accent },
+            error_selected = { fg = islands.red, bg = islands.bg, sp = islands.accent },
+            error_diagnostic_selected = { fg = islands.red, bg = islands.bg, sp = islands.accent },
+            warning_selected = { fg = islands.yellow, bg = islands.bg, sp = islands.accent },
+            warning_diagnostic_selected = { fg = islands.yellow, bg = islands.bg, sp = islands.accent },
+            indicator_selected = { fg = islands.accent, bg = islands.bg, sp = islands.accent, underline = true },
+            separator = { fg = islands.border, bg = islands.chrome },
+            separator_selected = { fg = islands.border, bg = islands.bg },
+            separator_visible = { fg = islands.border, bg = islands.panel },
           },
         })
         vim.keymap.set("n", "<S-h>", "<cmd>BufferLineCyclePrev<CR>", { desc = "Previous buffer" })
@@ -844,7 +982,9 @@ require("lazy").setup({
   },
   -- Configure any other settings here. See the documentation for more details.
   -- colorscheme that will be used when installing plugins.
-  install = { colorscheme = { "flexoki-dark" } },
+  install = { colorscheme = { "habamax" } },
   -- automatically check for plugin updates
   checker = { enabled = true },
 })
+-- Restore the palette if lazy.nvim temporarily used its installation fallback.
+vim.cmd.IslandsDark()
