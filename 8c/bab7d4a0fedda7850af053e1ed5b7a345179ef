@@ -1,0 +1,14 @@
+init.lua
+  h_3d40ba63c7880a 43-55,91-222,255,323-325,330,358-389,413,415-416,465,539-567,569-570,603,613,615,619,776
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "8cbab7d4a0fedda7850af053e1ed5b7a345179ef",
+  "prompts": {},
+  "humans": {
+    "h_3d40ba63c7880a": {
+      "author": "srikur <srikur@users.noreply.github.com>"
+    }
+  }
+}
