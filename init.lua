@@ -40,6 +40,19 @@ vim.o.tabstop = 4
 vim.o.shiftwidth = 4
 vim.o.softtabstop = 4
 vim.o.expandtab = true
+vim.o.updatetime = 250
+vim.o.timeoutlen = 400
+vim.opt.completeopt = { 'menu', 'menuone', 'noselect' }
+vim.diagnostic.config({
+  severity_sort = true,
+  update_in_insert = false,
+  float = { border = 'rounded', source = 'if_many' },
+})
+-- Copilot and LuaSnip otherwise compete for Tab.
+vim.g.copilot_no_tab_map = true
+vim.keymap.set('i', '<M-a>', 'copilot#Accept("")', {
+  expr = true, replace_keycodes = false, desc = 'Accept Copilot suggestion',
+})
 vim.keymap.set('n', '<Esc>', '<cmd>nohlsearch<CR>')
 vim.keymap.set('n', '<leader>cp', function()
   local path = vim.api.nvim_buf_get_name(0)
@@ -75,6 +88,138 @@ if not vim.treesitter.language.ft_to_lang then
   vim.treesitter.language.ft_to_lang = vim.treesitter.language.get_lang
 end
 
+-- C++ workflow settings. Existing CMake caches keep their compiler/toolchain.
+local cpp = {
+  compiler = vim.fn.executable('g++-16') == 1 and 'g++-16' or 'clang++',
+  standard = 'c++26',
+  build_dir = 'build',
+  programs = {},
+}
+local function cpp_root()
+  local file = vim.api.nvim_buf_get_name(0)
+  local start = file ~= '' and vim.fs.dirname(file) or vim.fn.getcwd()
+  local git = vim.fs.root(start, '.git')
+  if git and vim.fn.filereadable(git .. '/CMakeLists.txt') == 1 then return git end
+  return vim.fs.root(start, 'CMakeLists.txt') or git or start
+end
+
+-- Run without a shell: spaces in paths and compiler arguments remain intact.
+-- Keep one task active so concurrent builds cannot overwrite the quickfix list.
+local cpp_job
+local function cpp_task(argv, root, on_success)
+  if cpp_job then return vim.notify('A C++ task is running; use :CppStop first', vim.log.levels.WARN) end
+  if vim.fn.executable(argv[1]) ~= 1 then
+    return vim.notify('Executable not found: ' .. argv[1], vim.log.levels.ERROR)
+  end
+  vim.cmd('wall')
+  local title = table.concat(argv, ' ')
+  local efm = vim.o.errorformat
+  vim.notify('Started: ' .. title)
+  local ok, job = pcall(vim.system, argv, { cwd = root, text = true }, function(result)
+    vim.schedule(function()
+      cpp_job = nil
+      -- Prefix the output with a directory marker so relative diagnostics resolve
+      -- against the project, even if the editor's working directory changes.
+      local lines = { 'Entering directory `' .. root .. "'" }
+      vim.list_extend(lines, vim.split((result.stdout or '') .. '\n' .. (result.stderr or ''), '\n'))
+      vim.fn.setqflist({}, ' ', { title = title, lines = lines, efm = "%DEntering directory `%f'," .. efm })
+      if result.code ~= 0 then
+        vim.cmd('botright copen')
+        vim.notify('C++ task failed (exit ' .. result.code .. ')', vim.log.levels.ERROR)
+      else
+        vim.notify('Finished: ' .. title)
+        if on_success then on_success() end
+      end
+    end)
+  end)
+  if ok then cpp_job = job else vim.notify(tostring(job), vim.log.levels.ERROR) end
+end
+
+vim.api.nvim_create_user_command('CppConfigure', function(opts)
+  local root = cpp_root()
+  if vim.fn.filereadable(root .. '/CMakeLists.txt') == 0 then
+    return vim.notify('No CMakeLists.txt found', vim.log.levels.WARN)
+  end
+  local argv = { 'cmake', '-S', root, '-B', root .. '/' .. cpp.build_dir,
+    '-DCMAKE_BUILD_TYPE=Debug', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON' }
+  vim.list_extend(argv, opts.fargs)
+  cpp_task(argv, root)
+end, { nargs = '*', desc = 'Configure CMake in build/ (extra CMake arguments allowed)' })
+
+vim.api.nvim_create_user_command('CppBuild', function(opts)
+  local root = cpp_root()
+  local build = root .. '/' .. cpp.build_dir
+  if vim.fn.filereadable(build .. '/CMakeCache.txt') == 0 then
+    return vim.notify('Run :CppConfigure first, or use :CppBuildFile for a standalone file', vim.log.levels.WARN)
+  end
+  local argv = { 'cmake', '--build', build, '--config', 'Debug', '--parallel' }
+  if #opts.fargs > 0 then
+    table.insert(argv, '--target')
+    vim.list_extend(argv, opts.fargs)
+  end
+  cpp_task(argv, root)
+end, { nargs = '*', desc = 'Build CMake project (optional target names)' })
+
+vim.api.nvim_create_user_command('CppBuildFile', function()
+  local file = vim.api.nvim_buf_get_name(0)
+  if vim.bo.filetype ~= 'cpp' or file == '' then
+    return vim.notify('Open a named C++ source file first', vim.log.levels.WARN)
+  end
+  -- Cache binaries outside the source tree; hash the path to avoid name collisions.
+  local dir = vim.fn.stdpath('cache') .. '/cpp/' .. vim.fn.sha256(file):sub(1, 16)
+  vim.fn.mkdir(dir, 'p')
+  local program = dir .. '/' .. vim.fn.fnamemodify(file, ':t:r')
+  local root = cpp_root()
+  cpp_task({ cpp.compiler, '-std=' .. cpp.standard, '-g', '-O0', '-Wall', '-Wextra',
+    '-fdiagnostics-color=never', file, '-o', program }, root, function()
+      cpp.programs[root] = program
+    end)
+end, { desc = 'Build current standalone C++ file with debug symbols and warnings' })
+
+vim.api.nvim_create_user_command('CppTest', function(opts)
+  local root = cpp_root()
+  local argv = { 'ctest', '--test-dir', root .. '/' .. cpp.build_dir,
+    '-C', 'Debug', '--output-on-failure', '--no-tests=error' }
+  vim.list_extend(argv, opts.fargs)
+  cpp_task(argv, root)
+end, { nargs = '*', desc = 'Run CTest (extra arguments allowed, e.g. -R test_name)' })
+
+vim.api.nvim_create_user_command('CppStop', function()
+  if cpp_job then cpp_job:kill(15) end
+end, { desc = 'Stop the active C++ task' })
+
+local function cpp_program()
+  local root = cpp_root()
+  local path = vim.fn.input({ prompt = 'Executable: ',
+    default = cpp.programs[root] or root .. '/' .. cpp.build_dir .. '/', completion = 'file' })
+  if path == '' then return end
+  path = vim.fn.fnamemodify(vim.fn.expand(path), ':p')
+  if vim.fn.isdirectory(path) == 1 or vim.fn.executable(path) ~= 1 then
+    vim.notify('Not an executable file: ' .. path, vim.log.levels.ERROR)
+    return
+  end
+  cpp.programs[root] = path
+  return path
+end
+
+vim.api.nvim_create_user_command('CppRun', function()
+  local root = cpp_root()
+  local program = cpp_program()
+  if not program then return end
+  vim.cmd('botright 15new')
+  vim.fn.jobstart({ program }, { term = true, cwd = root })
+  vim.cmd('startinsert')
+end, { desc = 'Run a C++ executable in an interactive terminal' })
+
+for key, command in pairs({ c = 'CppConfigure', b = 'CppBuild', f = 'CppBuildFile',
+  t = 'CppTest', r = 'CppRun', s = 'CppStop' }) do
+  vim.keymap.set('n', '<leader>m' .. key, '<cmd>' .. command .. '<CR>', { desc = command })
+end
+vim.keymap.set('n', '<leader>mq', '<cmd>copen<CR>', { desc = 'Build output / quickfix' })
+vim.keymap.set('n', ']q', '<cmd>cnext<CR>', { desc = 'Next quickfix item' })
+vim.keymap.set('n', '[q', '<cmd>cprevious<CR>', { desc = 'Previous quickfix item' })
+vim.keymap.set('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
+
 -- Setup lazy.nvim
 require("lazy").setup({
   spec = {
@@ -107,6 +252,7 @@ require("lazy").setup({
         -- Auto-open nvim-tree on startup, then focus back on the file
         vim.api.nvim_create_autocmd("VimEnter", {
           callback = function()
+            if #vim.api.nvim_list_uis() == 0 or vim.o.diff then return end
             require("nvim-tree.api").tree.open()
             vim.cmd("wincmd l")
           end,
@@ -174,17 +320,15 @@ require("lazy").setup({
       "williamboman/mason-lspconfig.nvim",
       dependencies = { "williamboman/mason.nvim" },
       opts = {
-        ensure_installed = { "lua_ls", "basedpyright", "ruff", "ts_ls", "rust_analyzer", "clangd" },
-        automatic_installation = true,
+        ensure_installed = { "lua_ls", "basedpyright", "ruff", "ts_ls", "rust_analyzer" },
+        -- Enable only after our native configurations (including Apple clangd) are ready.
+        automatic_enable = false,
       },
     },
     {
       "neovim/nvim-lspconfig",
-      dependencies = { "williamboman/mason.nvim", "williamboman/mason-lspconfig.nvim" },
+      dependencies = { "williamboman/mason.nvim", "williamboman/mason-lspconfig.nvim", "hrsh7th/cmp-nvim-lsp" },
       config = function()
-        -- Add Mason bin to PATH so servers are discoverable
-        vim.env.PATH = vim.fn.stdpath("data") .. "/mason/bin" .. ":" .. vim.env.PATH
-
         local capabilities = vim.lsp.protocol.make_client_capabilities()
         local ok, cmp_lsp = pcall(require, "cmp_nvim_lsp")
         if ok then
@@ -211,6 +355,38 @@ require("lazy").setup({
             map("<leader>ds", vim.lsp.buf.document_symbol, "Document symbols")
             map("<leader>ws", vim.lsp.buf.workspace_symbol, "Workspace symbols")
             map("<leader>cf", function() vim.lsp.buf.format({ async = true }) end, "Format file")
+            map("<leader>ct", vim.lsp.buf.type_definition, "Go to type definition")
+            map("<leader>ci", vim.lsp.buf.incoming_calls, "Incoming calls")
+            map("<leader>co", vim.lsp.buf.outgoing_calls, "Outgoing calls")
+            vim.keymap.set('i', '<C-k>', vim.lsp.buf.signature_help,
+              { buffer = event.buf, desc = 'LSP: Signature help' })
+            vim.keymap.set('x', '<leader>ca', vim.lsp.buf.code_action,
+              { buffer = event.buf, desc = 'LSP: Code action' })
+
+            local client = vim.lsp.get_client_by_id(event.data.client_id)
+            if client and client:supports_method('textDocument/inlayHint') then
+              map('<leader>ch', function()
+                local filter = { bufnr = event.buf }
+                vim.lsp.inlay_hint.enable(not vim.lsp.inlay_hint.is_enabled(filter), filter)
+              end, 'Toggle inlay hints')
+            end
+            if client and client.name == 'clangd' then
+              map('<leader>cs', '<cmd>LspClangdSwitchSourceHeader<CR>', 'Switch source/header')
+              map('<leader>cF', function()
+                vim.b[event.buf].cpp_format_on_save = not vim.b[event.buf].cpp_format_on_save
+                vim.notify('C/C++ format on save: ' .. tostring(vim.b[event.buf].cpp_format_on_save))
+              end, 'Toggle format on save (buffer)')
+            end
+          end,
+        })
+
+        -- Explicit opt-in per buffer; clangd uses the project's .clang-format.
+        vim.api.nvim_create_autocmd('BufWritePre', {
+          group = vim.api.nvim_create_augroup('cpp-format-on-save', { clear = true }),
+          callback = function(ev)
+            if vim.b[ev.buf].cpp_format_on_save then
+              vim.lsp.buf.format({ bufnr = ev.buf, name = 'clangd', timeout_ms = 2000 })
+            end
           end,
         })
 
@@ -234,10 +410,10 @@ require("lazy").setup({
         })
 
         -- Diagnostic keymaps
-        vim.keymap.set("n", "<leader>q", vim.diagnostic.setloclist, { desc = "Diagnostics quickfix list" })
+        vim.keymap.set("n", "<leader>q", vim.diagnostic.setloclist, { desc = "Diagnostics location list" })
         vim.keymap.set("n", "<leader>dd", vim.diagnostic.open_float, { desc = "Show diagnostic message" })
-        vim.keymap.set("n", "]d", vim.diagnostic.goto_next, { desc = "Next diagnostic" })
-        vim.keymap.set("n", "[d", vim.diagnostic.goto_prev, { desc = "Previous diagnostic" })
+        vim.keymap.set("n", "]d", function() vim.diagnostic.jump({ count = 1, float = true }) end, { desc = "Next diagnostic" })
+        vim.keymap.set("n", "[d", function() vim.diagnostic.jump({ count = -1, float = true }) end, { desc = "Previous diagnostic" })
 
         -- Walk up from a directory to find the nearest .venv
         local function find_python_path(start_dir)
@@ -286,6 +462,7 @@ require("lazy").setup({
         vim.lsp.config("rust_analyzer", { capabilities = capabilities })
         vim.lsp.config("clangd", {
           capabilities = capabilities,
+          root_markers = { '.clangd', 'compile_commands.json', 'compile_flags.txt', '.git', 'CMakeLists.txt' },
           cmd = {
             -- Apple's clangd, not Mason's: the Mason build (22.1.6) fails to parse
             -- Homebrew GCC 16's libstdc++ headers, Apple's parses them cleanly
@@ -359,7 +536,38 @@ require("lazy").setup({
           },
         }
 
+        -- CodeLLDB is already installed through Mason; retain the Python adapters.
+        dap.adapters.codelldb = {
+          type = 'server',
+          port = '${port}',
+          executable = {
+            command = vim.fn.stdpath('data') .. '/mason/bin/codelldb',
+            args = { '--port', '${port}' },
+          },
+        }
+        dap.configurations.cpp = {
+          {
+            name = 'C/C++: launch executable',
+            type = 'codelldb',
+            request = 'launch',
+            program = function() return cpp_program() or dap.ABORT end,
+            cwd = cpp_root,
+            stopOnEntry = false,
+            args = {},
+          },
+          {
+            name = 'C/C++: attach to process',
+            type = 'codelldb',
+            request = 'attach',
+            pid = require('dap.utils').pick_process,
+            cwd = cpp_root,
+          },
+        }
+        dap.configurations.c = vim.deepcopy(dap.configurations.cpp)
+
         -- Keymaps
+        vim.keymap.set('n', '<F5>', dap.continue, { desc = 'Debug start / continue' })
+        vim.keymap.set({ 'n', 'x' }, '<leader>de', dapui.eval, { desc = 'Evaluate expression' })
         vim.keymap.set("n", "<leader>db", dap.toggle_breakpoint, { desc = "Toggle breakpoint" })
         vim.keymap.set("n", "<leader>dB", function()
           dap.set_breakpoint(vim.fn.input("Breakpoint condition: "))
@@ -392,6 +600,7 @@ require("lazy").setup({
         local luasnip = require("luasnip")
         require("luasnip.loaders.from_vscode").lazy_load()
         cmp.setup({
+          preselect = cmp.PreselectMode.None,
           snippet = {
             expand = function(args) luasnip.lsp_expand(args.body) end,
           },
@@ -401,13 +610,13 @@ require("lazy").setup({
             ["<C-d>"] = cmp.mapping.scroll_docs(-4),
             ["<C-f>"] = cmp.mapping.scroll_docs(4),
             ["<C-Space>"] = cmp.mapping.complete(),
-            ["<CR>"] = cmp.mapping.confirm({ select = true }),
+            ["<CR>"] = cmp.mapping.confirm({ select = false }),
             ["<Tab>"] = cmp.mapping(function(fallback)
-              if luasnip.expand_or_jumpable() then luasnip.expand_or_jump()
+              if luasnip.expand_or_locally_jumpable() then luasnip.expand_or_jump()
               else fallback() end
             end, { "i", "s" }),
             ["<S-Tab>"] = cmp.mapping(function(fallback)
-              if luasnip.jumpable(-1) then luasnip.jump(-1)
+              if luasnip.locally_jumpable(-1) then luasnip.jump(-1)
               else fallback() end
             end, { "i", "s" }),
           }),
@@ -564,6 +773,7 @@ require("lazy").setup({
           { "<leader>d", group = "Diagnostics/Debug" },
           { "<leader>r", group = "Rename" },
           { "<leader>w", group = "Workspace" },
+          { "<leader>m", group = "C++ build / run / test" },
         })
       end,
     },
@@ -638,4 +848,3 @@ require("lazy").setup({
   -- automatically check for plugin updates
   checker = { enabled = true },
 })
-
