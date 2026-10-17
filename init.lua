@@ -48,6 +48,14 @@ vim.diagnostic.config({
   update_in_insert = false,
   float = { border = 'rounded', source = 'if_many' },
 })
+-- Clang does not understand all of the C++26 features used by our projects.
+vim.api.nvim_create_autocmd('FileType', {
+  group = vim.api.nvim_create_augroup('cpp-disable-diagnostics', { clear = true }),
+  pattern = 'cpp',
+  callback = function(event)
+    vim.diagnostic.enable(false, { bufnr = event.buf })
+  end,
+})
 -- Copilot and LuaSnip otherwise compete for Tab.
 vim.g.copilot_no_tab_map = true
 vim.keymap.set('i', '<M-a>', 'copilot#Accept("")', {
@@ -88,143 +96,27 @@ if not vim.treesitter.language.ft_to_lang then
   vim.treesitter.language.ft_to_lang = vim.treesitter.language.get_lang
 end
 
--- C++ workflow settings. Existing CMake caches keep their compiler/toolchain.
-local cpp = {
-  compiler = vim.fn.executable('g++-16') == 1 and 'g++-16' or 'clang++',
-  standard = 'c++26',
-  build_dir = 'build',
-  programs = {},
-}
-local function cpp_root()
+-- CMake target selection, builds, and persistent run/debug settings.
+local cpp = require('config.cpp')
+cpp.setup()
+
+vim.keymap.set('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
+local windows = require('config.windows')
+windows.setup()
+require('config.terminal').setup()
+require('config.format').setup()
+
+local function rust_root()
   local file = vim.api.nvim_buf_get_name(0)
   local start = file ~= '' and vim.fs.dirname(file) or vim.fn.getcwd()
-  local git = vim.fs.root(start, '.git')
-  if git and vim.fn.filereadable(git .. '/CMakeLists.txt') == 1 then return git end
-  return vim.fs.root(start, 'CMakeLists.txt') or git or start
+  return vim.fs.root(start, 'Cargo.toml') or vim.fs.root(start, 'rust-project.json') or start
 end
-
--- Run without a shell: spaces in paths and compiler arguments remain intact.
--- Keep one task active so concurrent builds cannot overwrite the quickfix list.
-local cpp_job
-local function cpp_task(argv, root, on_success)
-  if cpp_job then return vim.notify('A C++ task is running; use :CppStop first', vim.log.levels.WARN) end
-  if vim.fn.executable(argv[1]) ~= 1 then
-    return vim.notify('Executable not found: ' .. argv[1], vim.log.levels.ERROR)
-  end
-  vim.cmd('wall')
-  local title = table.concat(argv, ' ')
-  local efm = vim.o.errorformat
-  vim.notify('Started: ' .. title)
-  local ok, job = pcall(vim.system, argv, { cwd = root, text = true }, function(result)
-    vim.schedule(function()
-      cpp_job = nil
-      -- Prefix the output with a directory marker so relative diagnostics resolve
-      -- against the project, even if the editor's working directory changes.
-      local lines = { 'Entering directory `' .. root .. "'" }
-      vim.list_extend(lines, vim.split((result.stdout or '') .. '\n' .. (result.stderr or ''), '\n'))
-      vim.fn.setqflist({}, ' ', { title = title, lines = lines, efm = "%DEntering directory `%f'," .. efm })
-      if result.code ~= 0 then
-        vim.cmd('botright copen')
-        vim.notify('C++ task failed (exit ' .. result.code .. ')', vim.log.levels.ERROR)
-      else
-        vim.notify('Finished: ' .. title)
-        if on_success then on_success() end
-      end
-    end)
-  end)
-  if ok then cpp_job = job else vim.notify(tostring(job), vim.log.levels.ERROR) end
-end
-
-vim.api.nvim_create_user_command('CppConfigure', function(opts)
-  local root = cpp_root()
-  if vim.fn.filereadable(root .. '/CMakeLists.txt') == 0 then
-    return vim.notify('No CMakeLists.txt found', vim.log.levels.WARN)
-  end
-  local argv = { 'cmake', '-S', root, '-B', root .. '/' .. cpp.build_dir,
-    '-DCMAKE_BUILD_TYPE=Debug', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON' }
-  vim.list_extend(argv, opts.fargs)
-  cpp_task(argv, root)
-end, { nargs = '*', desc = 'Configure CMake in build/ (extra CMake arguments allowed)' })
-
-vim.api.nvim_create_user_command('CppBuild', function(opts)
-  local root = cpp_root()
-  local build = root .. '/' .. cpp.build_dir
-  if vim.fn.filereadable(build .. '/CMakeCache.txt') == 0 then
-    return vim.notify('Run :CppConfigure first, or use :CppBuildFile for a standalone file', vim.log.levels.WARN)
-  end
-  local argv = { 'cmake', '--build', build, '--config', 'Debug', '--parallel' }
-  if #opts.fargs > 0 then
-    table.insert(argv, '--target')
-    vim.list_extend(argv, opts.fargs)
-  end
-  cpp_task(argv, root)
-end, { nargs = '*', desc = 'Build CMake project (optional target names)' })
-
-vim.api.nvim_create_user_command('CppBuildFile', function()
-  local file = vim.api.nvim_buf_get_name(0)
-  if vim.bo.filetype ~= 'cpp' or file == '' then
-    return vim.notify('Open a named C++ source file first', vim.log.levels.WARN)
-  end
-  -- Cache binaries outside the source tree; hash the path to avoid name collisions.
-  local dir = vim.fn.stdpath('cache') .. '/cpp/' .. vim.fn.sha256(file):sub(1, 16)
-  vim.fn.mkdir(dir, 'p')
-  local program = dir .. '/' .. vim.fn.fnamemodify(file, ':t:r')
-  local root = cpp_root()
-  cpp_task({ cpp.compiler, '-std=' .. cpp.standard, '-g', '-O0', '-Wall', '-Wextra',
-    '-fdiagnostics-color=never', file, '-o', program }, root, function()
-      cpp.programs[root] = program
-    end)
-end, { desc = 'Build current standalone C++ file with debug symbols and warnings' })
-
-vim.api.nvim_create_user_command('CppTest', function(opts)
-  local root = cpp_root()
-  local argv = { 'ctest', '--test-dir', root .. '/' .. cpp.build_dir,
-    '-C', 'Debug', '--output-on-failure', '--no-tests=error' }
-  vim.list_extend(argv, opts.fargs)
-  cpp_task(argv, root)
-end, { nargs = '*', desc = 'Run CTest (extra arguments allowed, e.g. -R test_name)' })
-
-vim.api.nvim_create_user_command('CppStop', function()
-  if cpp_job then cpp_job:kill(15) end
-end, { desc = 'Stop the active C++ task' })
-
-local function cpp_program()
-  local root = cpp_root()
-  local path = vim.fn.input({ prompt = 'Executable: ',
-    default = cpp.programs[root] or root .. '/' .. cpp.build_dir .. '/', completion = 'file' })
-  if path == '' then return end
-  path = vim.fn.fnamemodify(vim.fn.expand(path), ':p')
-  if vim.fn.isdirectory(path) == 1 or vim.fn.executable(path) ~= 1 then
-    vim.notify('Not an executable file: ' .. path, vim.log.levels.ERROR)
-    return
-  end
-  cpp.programs[root] = path
-  return path
-end
-
-vim.api.nvim_create_user_command('CppRun', function()
-  local root = cpp_root()
-  local program = cpp_program()
-  if not program then return end
-  vim.cmd('botright 15new')
-  vim.fn.jobstart({ program }, { term = true, cwd = root })
-  vim.cmd('startinsert')
-end, { desc = 'Run a C++ executable in an interactive terminal' })
-
-for key, command in pairs({ c = 'CppConfigure', b = 'CppBuild', f = 'CppBuildFile',
-  t = 'CppTest', r = 'CppRun', s = 'CppStop' }) do
-  vim.keymap.set('n', '<leader>m' .. key, '<cmd>' .. command .. '<CR>', { desc = command })
-end
-vim.keymap.set('n', '<leader>mq', '<cmd>copen<CR>', { desc = 'Build output / quickfix' })
-vim.keymap.set('n', ']q', '<cmd>cnext<CR>', { desc = 'Next quickfix item' })
-vim.keymap.set('n', '[q', '<cmd>cprevious<CR>', { desc = 'Previous quickfix item' })
-vim.keymap.set('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
 
 -- Islands Dark, using CLion's bundled IslandSchemeDark.xml and UI palette.
 -- https://github.com/JetBrains/intellij-community/tree/master/platform/platform-resources/src/themes/islands
--- Kept here so the configuration remains a single file. :IslandsDark reapplies it.
+-- :IslandsDark reapplies it, including plugin highlights after lazy.nvim loads.
 local islands = {
-  bg = '#191A1C', panel = '#212326', chrome = '#26282C', border = '#33353B',
+  bg = '#191A1C', panel = '#191A1C', chrome = '#26282C', border = '#33353B',
   fg = '#BCBEC4', text = '#D1D3D9', muted = '#9FA2A8', comment = '#7A7E85',
   line = '#4B5059', cursorline = '#1F2024', selection = '#2A4371',
   orange = '#CF8E6D', green = '#6AAB73', blue = '#56A8F5', teal = '#2AACB8',
@@ -285,13 +177,20 @@ local function islands_dark()
     ['@tag'] = { fg = '#D5B778' }, ['@tag.attribute'] = { fg = p.fg },
     ['@lsp.type.typeParameter'] = { fg = '#16BAAC' },
     ['@lsp.mod.deprecated'] = { strikethrough = true },
-    NvimTreeNormal = { fg = p.fg, bg = p.panel }, NvimTreeNormalNC = { fg = p.fg, bg = p.panel },
+    NvimTreeNormal = { fg = p.text, bg = p.panel }, NvimTreeNormalNC = { fg = p.text, bg = p.panel },
     NvimTreeEndOfBuffer = { fg = p.panel, bg = p.panel },
     NvimTreeWinSeparator = { fg = p.border, bg = p.panel },
-    NvimTreeRootFolder = { fg = p.text, bold = true }, NvimTreeFolderName = { fg = p.fg },
+    NvimTreeRootFolder = { fg = p.text, bold = true }, NvimTreeFolderName = { fg = p.text },
     NvimTreeOpenedFolderName = { fg = p.text }, NvimTreeEmptyFolderName = { fg = p.muted },
     NvimTreeFolderIcon = { fg = p.muted }, NvimTreeIndentMarker = { fg = p.border },
     NvimTreeCursorLine = { bg = p.selection },
+    NvimTreeExecFile = { fg = p.text }, NvimTreeSpecialFile = { fg = p.text },
+    NvimTreeImageFile = { fg = p.text }, NvimTreeSymlink = { fg = p.text },
+    NvimTreeModifiedFileHL = { fg = p.changed }, NvimTreeModifiedFolderHL = { fg = p.changed },
+    NvimTreeModifiedIcon = { fg = p.changed },
+    ['@lsp.typemod.variable.readonly'] = { fg = p.purple, italic = true },
+    ['@lsp.typemod.property.static'] = { fg = p.purple, italic = true },
+    ['@lsp.typemod.method.static'] = { fg = p.blue, italic = true },
     TelescopeNormal = { fg = p.fg, bg = p.chrome }, TelescopeBorder = { fg = p.border, bg = p.chrome },
     TelescopeTitle = { fg = p.text, bg = p.chrome, bold = true },
     TelescopeSelection = { bg = p.selection }, TelescopeMatching = { fg = p.accent, bold = true },
@@ -316,6 +215,14 @@ local function islands_dark()
   end
   for name, color in pairs({ Add = p.added, Change = p.changed, Delete = p.deleted }) do
     groups['GitSigns' .. name] = { fg = color }
+  end
+  -- Current nvim-tree uses separate icon/file/folder groups. Its old GitNew
+  -- and GitDirty groups no longer color filenames.
+  for status, color in pairs({ New = '#E88F89', Dirty = '#70AEFF', Staged = '#73BD79',
+    Renamed = '#70AEFF', Deleted = '#6F737A', Ignored = '#D69A6B', Merge = '#DE6A66' }) do
+    groups['NvimTreeGit' .. status .. 'Icon'] = { fg = color }
+    groups['NvimTreeGitFile' .. status .. 'HL'] = { fg = color }
+    groups['NvimTreeGitFolder' .. status .. 'HL'] = { fg = color }
   end
   local links = {
     ['@function'] = 'Function', ['@function.builtin'] = 'Function', ['@function.method'] = 'Function',
@@ -359,8 +266,22 @@ require("lazy").setup({
         vim.g.loaded_netrwPlugin = 1
         require("nvim-tree").setup({
           view = { width = 35 },
-          filters = { dotfiles = false },
-          actions = { open_file = { window_picker = { enable = false } } },
+          filters = { dotfiles = false, git_ignored = false },
+          git = { enable = true, show_on_dirs = true },
+          modified = { enable = true, show_on_dirs = true },
+          update_focused_file = { enable = true },
+          renderer = {
+            root_folder_label = ':t',
+            highlight_git = 'name',
+            highlight_modified = 'name',
+            special_files = {},
+            indent_markers = { enable = true },
+            icons = { git_placement = 'after', modified_placement = 'after' },
+          },
+          actions = { open_file = { window_picker = {
+            enable = true,
+            picker = windows.editor,
+          } } },
           filesystem_watchers = { enable = true },
           reload_on_bufenter = true,
         })
@@ -390,6 +311,7 @@ require("lazy").setup({
         local telescope = require("telescope")
         telescope.setup({
           defaults = {
+            get_selection_window = function() return windows.editor() end,
             file_ignore_patterns = {
               "%.git/",
               "node_modules/",
@@ -402,7 +324,6 @@ require("lazy").setup({
               "cdk%.out/",
               "dist/",
               "build/",
-              "%.lock$",
             },
           },
           extensions = {
@@ -412,20 +333,204 @@ require("lazy").setup({
         pcall(telescope.load_extension, "fzf")
         pcall(telescope.load_extension, "ui-select")
         local builtin = require("telescope.builtin")
-        vim.keymap.set("n", "<leader>ff", builtin.find_files, { desc = "Find files" })
+        local function search_opts(all)
+          local args = { '--hidden', '--multiline', '--glob', '!.git/**' }
+          if all then table.insert(args, '--no-ignore') end
+          return {
+            cwd = require('config.project').root(),
+            additional_args = args,
+            file_ignore_patterns = all and { '%.git/' } or nil,
+          }
+        end
+        vim.keymap.set('n', '<leader>ff', function()
+          builtin.find_files({ cwd = require('config.project').root(), hidden = true })
+        end, { desc = 'Find project files (including dotfiles)' })
+        vim.keymap.set('n', '<leader>fF', function()
+          builtin.find_files({ cwd = require('config.project').root(), hidden = true,
+            no_ignore = true, file_ignore_patterns = { '%.git/' }, prompt_title = 'All project files' })
+        end, { desc = 'Find all project files (including ignored)' })
         vim.keymap.set("n", "<leader>fg", function()
-          builtin.live_grep({ additional_args = { "--multiline" } })
-        end, { desc = "Live grep" })
+          builtin.live_grep(search_opts(false))
+        end, { desc = "Search project" })
+        vim.keymap.set('n', '<leader>fG', function()
+          builtin.live_grep(search_opts(true))
+        end, { desc = 'Search all project files (including ignored)' })
         vim.keymap.set("n", "<leader>fb", builtin.buffers, { desc = "Find buffers" })
         vim.keymap.set("n", "<leader>fh", builtin.help_tags, { desc = "Help tags" })
-        vim.keymap.set("n", "<leader>fw", builtin.grep_string, { desc = "Grep word under cursor" })
+        vim.keymap.set('n', '<leader>fw', function()
+          builtin.grep_string(search_opts(false))
+        end, { desc = 'Find word in project' })
         vim.keymap.set("n", "<leader>fs", function()
-          builtin.grep_string({ search = "" })
+          builtin.grep_string(vim.tbl_extend('force', search_opts(false), { search = '' }))
         end, { desc = "Fuzzy search all content" })
         vim.keymap.set("n", "<leader>fd", builtin.diagnostics, { desc = "Diagnostics" })
         vim.keymap.set("n", "<leader>fr", builtin.resume, { desc = "Resume last search" })
         vim.keymap.set("n", "<leader>fo", builtin.oldfiles, { desc = "Recent files" })
         vim.keymap.set("n", "<leader>/", builtin.current_buffer_fuzzy_find, { desc = "Fuzzy find in buffer" })
+      end,
+    },
+
+    -- Review replacements across the project before applying them.
+    {
+      'MagicDuck/grug-far.nvim',
+      cmd = { 'GrugFar', 'GrugFarWithin' },
+      opts = {},
+      keys = {
+        { '<leader>rr', function()
+          require('grug-far').open({ prefills = { paths = require('config.project').search_path() } })
+        end, desc = 'Project search and replace' },
+        { '<leader>rr', function()
+          require('grug-far').with_visual_selection({ prefills = { paths = require('config.project').search_path() } })
+        end, mode = 'x', desc = 'Replace selection across project' },
+        { '<leader>rw', function()
+          require('grug-far').open({ prefills = {
+            paths = require('config.project').search_path(), search = vim.fn.expand('<cword>'),
+          } })
+        end, desc = 'Replace word across project' },
+      },
+    },
+
+    -- Rust commands and indentation; rust-analyzer handles edition-aware formatting.
+    {
+      "rust-lang/rust.vim",
+      ft = { "rust" },
+      cmd = { "Cargo", "Cbuild", "Ccheck", "Crun", "Ctest", "Cdoc" },
+      init = function()
+        vim.g.rustfmt_autosave = 0
+        vim.g.cargo_shell_command_runner = 'RustCargoTerminal'
+        vim.api.nvim_create_autocmd('FileType', {
+          group = vim.api.nvim_create_augroup('rust-workflow', { clear = true }),
+          pattern = 'rust',
+          callback = function(event)
+            local commands = {
+              b = { 'Cbuild', 'Cargo build' },
+              c = { 'Ccheck', 'Cargo check' },
+              r = { 'RustLsp runnables', 'Rust runnable targets' },
+              R = { 'RustLsp! runnables', 'Repeat last Rust runnable' },
+              t = { 'Ctest', 'Cargo test' },
+              l = { 'Cargo clippy', 'Cargo Clippy' },
+              d = { 'Cdoc --open', 'Cargo documentation' },
+              D = { 'RustLsp debuggables', 'Rust debug targets' },
+            }
+            for key, command in pairs(commands) do
+              vim.keymap.set('n', '<leader>m' .. key, '<cmd>' .. command[1] .. '<CR>',
+                { buffer = event.buf, desc = command[2] })
+            end
+            vim.keymap.set('n', '<leader>mT', function()
+              vim.cmd('wall')
+              require('neotest').run.run()
+            end, { buffer = event.buf, desc = 'Rust test under cursor' })
+            require('which-key').add({ { '<leader>m', group = 'Rust / Cargo', buffer = event.buf } })
+          end,
+        })
+      end,
+      config = function()
+        -- rust.vim supplies the Cargo arguments; run them without a shell, in the
+        -- current crate, so opening a Rust file from another directory also works.
+        vim.api.nvim_create_user_command('RustCargoTerminal', function(opts)
+          if vim.fn.executable('cargo') ~= 1 then
+            return vim.notify('Cargo is not installed', vim.log.levels.ERROR)
+          end
+          local root = rust_root()
+          vim.cmd('wall')
+          vim.cmd('botright 15new')
+          vim.fn.jobstart(opts.fargs, { term = true, cwd = root })
+          vim.cmd('startinsert')
+        end, { nargs = '+', desc = 'Run Cargo in the current Rust project' })
+      end,
+    },
+
+    -- Owns the Rust LSP client and discovers Cargo run/test/debug targets.
+    {
+      'mrcjkb/rustaceanvim',
+      version = '^9',
+      lazy = false,
+      dependencies = { 'williamboman/mason.nvim', 'hrsh7th/cmp-nvim-lsp', 'mfussenegger/nvim-dap' },
+      init = function()
+        vim.g.rustaceanvim = function()
+          return {
+            tools = {
+              test_executor = 'neotest',
+              code_actions = { ui_select_fallback = true },
+            },
+            server = {
+              cmd = { vim.fn.stdpath('data') .. '/mason/bin/rust-analyzer' },
+              capabilities = require('cmp_nvim_lsp').default_capabilities(),
+              default_settings = {
+                ['rust-analyzer'] = {
+                  cargo = { allTargets = true, buildScripts = { enable = true } },
+                  procMacro = { enable = true },
+                  checkOnSave = true,
+                  check = { command = 'clippy' },
+                },
+              },
+            },
+            dap = {
+              adapter = function() return require('dap').adapters.codelldb end,
+            },
+          }
+        end
+      end,
+    },
+
+    -- Test discovery, results, output, and debugging through rust-analyzer.
+    {
+      'nvim-neotest/neotest',
+      ft = { 'rust' },
+      dependencies = { 'nvim-neotest/nvim-nio', 'nvim-lua/plenary.nvim', 'mrcjkb/rustaceanvim' },
+      keys = {
+        { '<leader>tt', function() vim.cmd('wall'); require('neotest').run.run() end, desc = 'Run nearest test' },
+        { '<leader>tf', function() vim.cmd('wall'); require('neotest').run.run(vim.api.nvim_buf_get_name(0)) end, desc = 'Test current file' },
+        { '<leader>ta', function() vim.cmd('wall'); require('neotest').run.run({ suite = true }) end, desc = 'Run test suite' },
+        { '<leader>td', function() vim.cmd('wall'); require('neotest').run.run({ strategy = 'dap' }) end, desc = 'Debug nearest test' },
+        { '<leader>tl', function() vim.cmd('wall'); require('neotest').run.run_last() end, desc = 'Repeat last test' },
+        { '<leader>ts', function() require('neotest').summary.toggle() end, desc = 'Test summary' },
+        { '<leader>to', function() require('neotest').output.open({ enter = true }) end, desc = 'Test output' },
+        { '<leader>tO', function() require('neotest').output_panel.toggle() end, desc = 'Test output panel' },
+        { '<leader>tx', function() require('neotest').run.stop() end, desc = 'Stop test' },
+      },
+      config = function()
+        require('neotest').setup({ adapters = { require('rustaceanvim.neotest') } })
+      end,
+    },
+
+    -- Cargo dependency versions, features, documentation, and completion.
+    {
+      'saecki/crates.nvim',
+      tag = 'stable',
+      event = { 'BufReadPre Cargo.toml', 'BufNewFile Cargo.toml' },
+      dependencies = { 'nvim-lua/plenary.nvim', 'hrsh7th/nvim-cmp' },
+      config = function()
+        local crates = require('crates')
+        local function on_attach(bufnr)
+          local map = function(key, action, desc)
+            vim.keymap.set('n', '<leader>p' .. key, action, { buffer = bufnr, desc = desc })
+          end
+          map('v', crates.show_versions_popup, 'Crate versions')
+          map('f', crates.show_features_popup, 'Crate features')
+          map('d', crates.open_documentation, 'Crate documentation')
+          map('u', crates.update_crate, 'Update crate within version requirement')
+          map('U', crates.upgrade_crate, 'Upgrade crate version requirement')
+          map('r', crates.reload, 'Refresh crate information')
+          require('which-key').add({ { '<leader>p', group = 'Cargo dependencies', buffer = bufnr } })
+          require('cmp').setup.buffer({ sources = {
+            { name = 'crates' }, { name = 'nvim_lsp' }, { name = 'luasnip' },
+            { name = 'buffer' }, { name = 'path' },
+          } })
+        end
+        crates.setup({
+          completion = { cmp = { enabled = true } },
+          on_attach = on_attach,
+        })
+        -- crates.nvim attaches to existing manifests itself; include newly created ones.
+        vim.api.nvim_create_autocmd('BufNewFile', {
+          group = vim.api.nvim_create_augroup('crates-new-manifest', { clear = true }),
+          pattern = 'Cargo.toml',
+          callback = function(event)
+            crates.update(event.buf)
+            on_attach(event.buf)
+          end,
+        })
       end,
     },
 
@@ -435,8 +540,8 @@ require("lazy").setup({
       "williamboman/mason-lspconfig.nvim",
       dependencies = { "williamboman/mason.nvim" },
       opts = {
-        ensure_installed = { "lua_ls", "basedpyright", "ruff", "ts_ls", "rust_analyzer" },
-        -- Enable only after our native configurations (including Apple clangd) are ready.
+        ensure_installed = { "lua_ls", "basedpyright", "ruff", "ts_ls", "rust_analyzer", "taplo" },
+        -- Rustaceanvim owns Rust; enable the other servers after their configurations are ready.
         automatic_enable = false,
       },
     },
@@ -469,7 +574,7 @@ require("lazy").setup({
             map("<leader>rn", vim.lsp.buf.rename, "Rename symbol")
             map("<leader>ds", vim.lsp.buf.document_symbol, "Document symbols")
             map("<leader>ws", vim.lsp.buf.workspace_symbol, "Workspace symbols")
-            map("<leader>cf", function() vim.lsp.buf.format({ async = true }) end, "Format file")
+            map("<leader>cf", function() require('config.format').buffer() end, "Format file")
             map("<leader>ct", vim.lsp.buf.type_definition, "Go to type definition")
             map("<leader>ci", vim.lsp.buf.incoming_calls, "Incoming calls")
             map("<leader>co", vim.lsp.buf.outgoing_calls, "Outgoing calls")
@@ -492,16 +597,39 @@ require("lazy").setup({
                 vim.notify('C/C++ format on save: ' .. tostring(vim.b[event.buf].cpp_format_on_save))
               end, 'Toggle format on save (buffer)')
             end
+            if client and client.name == 'rust-analyzer' then
+              map('K', '<cmd>RustLsp hover actions<CR>', 'Rust hover actions')
+              map('<leader>ca', '<cmd>RustLsp codeAction<CR>', 'Rust code actions')
+              map('<leader>cm', '<cmd>RustLsp expandMacro<CR>', 'Expand Rust macro')
+              map('<leader>ce', '<cmd>RustLsp explainError<CR>', 'Explain Rust compiler error')
+              map('<leader>cD', '<cmd>RustLsp renderDiagnostic<CR>', 'Full Rust compiler diagnostic')
+              map('<leader>cR', '<cmd>RustLsp relatedTests<CR>', 'Find related Rust tests')
+              map('<leader>cO', '<cmd>RustLsp openCargo<CR>', 'Open Cargo.toml')
+              map('<leader>cK', '<cmd>RustLsp openDocs<CR>', 'Open Rust documentation')
+              map('<leader>dt', '<cmd>RustLsp debug<CR>', 'Debug Rust target under cursor')
+              map('<leader>cF', function()
+                vim.b[event.buf].rust_format_on_save = vim.b[event.buf].rust_format_on_save == false
+                vim.notify('Rust format on save: ' .. tostring(vim.b[event.buf].rust_format_on_save))
+              end, 'Toggle format on save (buffer)')
+            end
           end,
         })
 
-        -- Explicit opt-in per buffer; clangd uses the project's .clang-format.
         vim.api.nvim_create_autocmd('BufWritePre', {
-          group = vim.api.nvim_create_augroup('cpp-format-on-save', { clear = true }),
+          group = vim.api.nvim_create_augroup('rust-format-on-save', { clear = true }),
           callback = function(ev)
-            if vim.b[ev.buf].cpp_format_on_save then
-              vim.lsp.buf.format({ bufnr = ev.buf, name = 'clangd', timeout_ms = 2000 })
-            end
+            if vim.bo[ev.buf].filetype ~= 'rust' or vim.b[ev.buf].rust_format_on_save == false then return end
+            if #vim.lsp.get_clients({ bufnr = ev.buf, name = 'rust-analyzer' }) == 0 then return end
+            vim.lsp.buf.format({ bufnr = ev.buf, name = 'rust-analyzer', timeout_ms = 3000 })
+          end,
+        })
+
+        vim.api.nvim_create_autocmd('BufWritePre', {
+          group = vim.api.nvim_create_augroup('toml-format-on-save', { clear = true }),
+          callback = function(ev)
+            if vim.bo[ev.buf].filetype ~= 'toml' then return end
+            if #vim.lsp.get_clients({ bufnr = ev.buf, name = 'taplo' }) == 0 then return end
+            vim.lsp.buf.format({ bufnr = ev.buf, name = 'taplo', timeout_ms = 3000 })
           end,
         })
 
@@ -574,7 +702,10 @@ require("lazy").setup({
         })
 
         vim.lsp.config("ts_ls", { capabilities = capabilities })
-        vim.lsp.config("rust_analyzer", { capabilities = capabilities })
+        vim.lsp.config("taplo", {
+          capabilities = capabilities,
+          root_markers = { '.taplo.toml', 'taplo.toml', 'Cargo.toml', '.git' },
+        })
         vim.lsp.config("clangd", {
           capabilities = capabilities,
           root_markers = { '.clangd', 'compile_commands.json', 'compile_flags.txt', '.git', 'CMakeLists.txt' },
@@ -596,7 +727,7 @@ require("lazy").setup({
         })
 
         -- Enable all configured servers
-        vim.lsp.enable({ "lua_ls", "basedpyright", "ruff", "ts_ls", "rust_analyzer", "clangd" })
+        vim.lsp.enable({ "lua_ls", "basedpyright", "ruff", "ts_ls", "taplo", "clangd" })
       end,
     },
 
@@ -651,7 +782,7 @@ require("lazy").setup({
           },
         }
 
-        -- CodeLLDB is already installed through Mason; retain the Python adapters.
+        -- Shared C/C++ and Rust adapter (:MasonInstall codelldb).
         dap.adapters.codelldb = {
           type = 'server',
           port = '${port}',
@@ -665,8 +796,8 @@ require("lazy").setup({
             name = 'C/C++: launch executable',
             type = 'codelldb',
             request = 'launch',
-            program = function() return cpp_program() or dap.ABORT end,
-            cwd = cpp_root,
+            program = function() return cpp.program() or dap.ABORT end,
+            cwd = cpp.root,
             stopOnEntry = false,
             args = {},
           },
@@ -675,19 +806,36 @@ require("lazy").setup({
             type = 'codelldb',
             request = 'attach',
             pid = require('dap.utils').pick_process,
-            cwd = cpp_root,
+            cwd = cpp.root,
           },
         }
         dap.configurations.c = vim.deepcopy(dap.configurations.cpp)
+        dap.configurations.rust = {
+          -- Rustaceanvim adds launch configurations for the current workspace.
+          {
+            name = 'Rust: attach to process',
+            type = 'codelldb',
+            request = 'attach',
+            pid = require('dap.utils').pick_process,
+            cwd = rust_root,
+            sourceLanguages = { 'rust' },
+          },
+        }
 
         -- Keymaps
-        vim.keymap.set('n', '<F5>', dap.continue, { desc = 'Debug start / continue' })
+        local function debug_continue()
+          if not dap.session() and vim.bo.filetype == 'cpp'
+            and vim.fn.filereadable(cpp.root() .. '/CMakeLists.txt') == 1 then
+            cpp.launch('debug', true)
+          else dap.continue() end
+        end
+        vim.keymap.set('n', '<F5>', debug_continue, { desc = 'Debug start / continue' })
         vim.keymap.set({ 'n', 'x' }, '<leader>de', dapui.eval, { desc = 'Evaluate expression' })
         vim.keymap.set("n", "<leader>db", dap.toggle_breakpoint, { desc = "Toggle breakpoint" })
         vim.keymap.set("n", "<leader>dB", function()
           dap.set_breakpoint(vim.fn.input("Breakpoint condition: "))
         end, { desc = "Conditional breakpoint" })
-        vim.keymap.set("n", "<leader>dc", dap.continue, { desc = "Debug continue" })
+        vim.keymap.set("n", "<leader>dc", debug_continue, { desc = "Debug start / continue" })
         vim.keymap.set("n", "<leader>do", dap.step_over, { desc = "Debug step over" })
         vim.keymap.set("n", "<F8>", dap.step_over, { desc = "Debug step over" })
         vim.keymap.set("n", "<leader>di", dap.step_into, { desc = "Debug step into" })
@@ -729,9 +877,11 @@ require("lazy").setup({
             ["<C-d>"] = cmp.mapping.scroll_docs(-4),
             ["<C-f>"] = cmp.mapping.scroll_docs(4),
             ["<C-Space>"] = cmp.mapping.complete(),
+            ["<Esc>"] = cmp.mapping.abort(),
             ["<CR>"] = cmp.mapping.confirm({ select = false }),
             ["<Tab>"] = cmp.mapping(function(fallback)
-              if luasnip.expand_or_locally_jumpable() then luasnip.expand_or_jump()
+              if cmp.visible() then cmp.confirm({ select = true })
+              elseif luasnip.expand_or_locally_jumpable() then luasnip.expand_or_jump()
               else fallback() end
             end, { "i", "s" }),
             ["<S-Tab>"] = cmp.mapping(function(fallback)
@@ -754,7 +904,7 @@ require("lazy").setup({
       "nvim-treesitter/nvim-treesitter",
       build = ":TSUpdate",
       config = function()
-        local ensure = { "lua", "python", "javascript", "typescript", "rust", "c", "cpp", "json", "yaml", "html", "css", "bash", "markdown", "vimdoc" }
+        local ensure = { "lua", "python", "javascript", "typescript", "rust", "toml", "c", "cpp", "json", "yaml", "html", "css", "bash", "markdown", "vimdoc" }
         -- Compiles any missing parsers (async, needs the tree-sitter CLI);
         -- no-op for parsers already installed
         require("nvim-treesitter").install(ensure)
@@ -762,6 +912,63 @@ require("lazy").setup({
           group = vim.api.nvim_create_augroup("treesitter-auto-install", { clear = true }),
           callback = function(event)
             pcall(vim.treesitter.start, event.buf)
+          end,
+        })
+      end,
+    },
+
+    -- Structural selections, function/class motions, and argument swapping.
+    {
+      'nvim-treesitter/nvim-treesitter-textobjects',
+      branch = 'main',
+      dependencies = { 'nvim-treesitter/nvim-treesitter' },
+      config = function()
+        require('nvim-treesitter-textobjects').setup({
+          select = {
+            lookahead = true,
+            selection_modes = { ['@function.outer'] = 'V', ['@class.outer'] = 'V' },
+          },
+          move = { set_jumps = true },
+        })
+        vim.api.nvim_create_autocmd('FileType', {
+          group = vim.api.nvim_create_augroup('structural-editing', { clear = true }),
+          callback = function(event)
+            -- Apply after ftplugins, which may provide their own [m / ]m maps.
+            vim.schedule(function()
+              if not vim.api.nvim_buf_is_valid(event.buf) then return end
+              local lang = vim.treesitter.language.get_lang(vim.bo[event.buf].filetype)
+              if not lang or not pcall(vim.treesitter.get_parser, event.buf, lang) then return end
+              local function map(modes, key, action, desc)
+                vim.keymap.set(modes, key, action, { buffer = event.buf, desc = desc })
+              end
+              for key, capture in pairs({
+                af = '@function.outer', ['if'] = '@function.inner',
+                ac = '@class.outer', ic = '@class.inner',
+                aa = '@parameter.outer', ia = '@parameter.inner',
+              }) do
+                map({ 'x', 'o' }, key, function()
+                  require('nvim-treesitter-textobjects.select').select_textobject(capture, 'textobjects')
+                end, 'Select ' .. capture:sub(2))
+              end
+              for key, spec in pairs({
+                [']m'] = { 'goto_next_start', '@function.outer' },
+                ['[m'] = { 'goto_previous_start', '@function.outer' },
+                [']M'] = { 'goto_next_end', '@function.outer' },
+                ['[M'] = { 'goto_previous_end', '@function.outer' },
+                [']]'] = { 'goto_next_start', '@class.outer' },
+                ['[['] = { 'goto_previous_start', '@class.outer' },
+              }) do
+                map({ 'n', 'x', 'o' }, key, function()
+                  require('nvim-treesitter-textobjects.move')[spec[1]](spec[2], 'textobjects')
+                end, spec[1]:gsub('_', ' ') .. ' ' .. spec[2]:sub(2))
+              end
+              map('n', '<leader>c>', function()
+                require('nvim-treesitter-textobjects.swap').swap_next('@parameter.inner')
+              end, 'Swap argument with next')
+              map('n', '<leader>c<', function()
+                require('nvim-treesitter-textobjects.swap').swap_previous('@parameter.inner')
+              end, 'Swap argument with previous')
+            end)
           end,
         })
       end,
@@ -800,6 +1007,11 @@ require("lazy").setup({
             section_separators = "",
             component_separators = "",
           },
+          sections = {
+            lualine_b = { 'branch', 'diff', {
+              'diagnostics', cond = function() return vim.bo.filetype ~= 'cpp' end,
+            } },
+          },
         })
       end,
     },
@@ -826,6 +1038,24 @@ require("lazy").setup({
       end,
     },
 
+    -- Right-side overview of the viewport and Git changes.
+    {
+      'petertriho/nvim-scrollbar',
+      event = { 'BufReadPost', 'BufNewFile' },
+      dependencies = { 'lewis6991/gitsigns.nvim' },
+      opts = {
+        handle = { color = islands.border, blend = 0 },
+        marks = {
+          GitAdd = { text = '▎', color = islands.added },
+          GitChange = { text = '▎', color = islands.changed },
+          GitDelete = { text = '▁', color = islands.deleted },
+        },
+        excluded_buftypes = { 'terminal', 'nofile', 'prompt', 'quickfix' },
+        -- Keep this overview focused on Git; C++ diagnostics are disabled above.
+        handlers = { gitsigns = true, cursor = false, diagnostic = false },
+      },
+    },
+
     -- Git merge conflict viewer (JetBrains-like 3-way merge)
     {
       "sindrets/diffview.nvim",
@@ -836,6 +1066,19 @@ require("lazy").setup({
         vim.keymap.set("n", "<leader>gq", "<cmd>DiffviewClose<CR>", { desc = "Close diff view" })
         vim.keymap.set("n", "<leader>gh", "<cmd>DiffviewFileHistory %<CR>", { desc = "File history" })
       end,
+    },
+
+    -- Commit, branch, stash, and rebase using the existing diff viewer.
+    {
+      'NeogitOrg/neogit',
+      cmd = 'Neogit',
+      dependencies = { 'sindrets/diffview.nvim', 'nvim-telescope/telescope.nvim' },
+      opts = { kind = 'tab', integrations = { diffview = true, telescope = true } },
+      keys = {
+        { '<leader>gg', function()
+          require('neogit').open({ cwd = require('config.project').root() })
+        end, desc = 'Git status / commits / branches' },
+      },
     },
 
     -- Inline git conflict resolution
@@ -865,12 +1108,16 @@ require("lazy").setup({
     -- Session management (remembers open files)
     {
       "rmagatti/auto-session",
+      dependencies = { 'nvim-telescope/telescope.nvim' },
       config = function()
         require("auto-session").setup({
           suppressed_dirs = { "~/", "~/Downloads", "/" },
           pre_save_cmds = { "NvimTreeClose" },
           post_restore_cmds = { "NvimTreeOpen" },
+          session_lens = { picker = 'telescope' },
         })
+        vim.keymap.set('n', '<leader>wr', '<cmd>AutoSession search<CR>', { desc = 'Switch project session' })
+        vim.keymap.set('n', '<leader>wS', '<cmd>AutoSession save<CR>', { desc = 'Save project session' })
       end,
     },
 
@@ -887,11 +1134,13 @@ require("lazy").setup({
         wk.add({
           { "<leader>f", group = "Find" },
           { "<leader>h", group = "Git hunk" },
+          { "<leader>g", group = "Git" },
           { "<leader>c", group = "Code" },
           { "<leader>d", group = "Diagnostics/Debug" },
-          { "<leader>r", group = "Rename" },
+          { "<leader>r", group = "Rename / replace" },
           { "<leader>w", group = "Workspace" },
           { "<leader>m", group = "C++ build / run / test" },
+          { "<leader>t", group = "Tests / terminals" },
         })
       end,
     },
@@ -918,14 +1167,23 @@ require("lazy").setup({
       config = function()
         require("toggleterm").setup({
           size = 15,
-          open_mapping = [[<C-\>]],
           direction = "horizontal",
+          autochdir = false,
+          persist_size = true,
+          persist_mode = true,
+          close_on_exit = false,
+          winbar = {
+            enabled = true,
+            name_formatter = function(term)
+              return ('%d: %s'):format(term.id, require('config.terminal').display_name(term)):gsub('%%', '%%%%')
+            end,
+          },
           -- Keep terminal backgrounds consistent with the editor palette.
           shade_terminals = false,
+          highlights = { Normal = { guibg = islands.bg, guifg = islands.fg } },
+          on_open = function(term) windows.protect_terminal(term.window) end,
         })
-        vim.keymap.set("n", "<leader>t1", "<cmd>1ToggleTerm<CR>", { desc = "Terminal 1" })
-        vim.keymap.set("n", "<leader>t2", "<cmd>2ToggleTerm<CR>", { desc = "Terminal 2" })
-        vim.keymap.set("n", "<leader>t3", "<cmd>3ToggleTerm<CR>", { desc = "Terminal 3" })
+        require('config.terminal').setup_tools()
       end,
     },
 
@@ -937,9 +1195,11 @@ require("lazy").setup({
       config = function()
         require("bufferline").setup({
           options = {
+            left_mouse_command = windows.open_buffer,
+            custom_filter = function(buf) return vim.bo[buf].buftype ~= 'terminal' end,
             separator_style = 'thin',
             indicator = { style = 'underline' },
-            offsets = {{ filetype = "NvimTree", text = "File Explorer", highlight = "Directory", separator = true }},
+            offsets = {{ filetype = "NvimTree", text = "Project", highlight = "NvimTreeRootFolder", separator = true }},
             diagnostics = "nvim_lsp",
           },
           highlights = {
@@ -961,8 +1221,14 @@ require("lazy").setup({
             separator_visible = { fg = islands.border, bg = islands.panel },
           },
         })
-        vim.keymap.set("n", "<S-h>", "<cmd>BufferLineCyclePrev<CR>", { desc = "Previous buffer" })
-        vim.keymap.set("n", "<S-l>", "<cmd>BufferLineCycleNext<CR>", { desc = "Next buffer" })
+        vim.keymap.set('n', '<S-h>', function()
+          windows.focus_editor()
+          vim.cmd.BufferLineCyclePrev()
+        end, { desc = 'Previous buffer' })
+        vim.keymap.set('n', '<S-l>', function()
+          windows.focus_editor()
+          vim.cmd.BufferLineCycleNext()
+        end, { desc = 'Next buffer' })
         vim.keymap.set("n", "<leader>bd", function()
           local win_type = vim.fn.win_gettype()
           if win_type == "quickfix" or win_type == "loclist" then
